@@ -1,3 +1,4 @@
 lavila/
 *.mp4
 ego4d_data/
+__pycache__/
