@@ -1,8 +1,16 @@
 import itertools
 import pathlib
 import torch
+import torchvision
+import sys
+from collections import OrderedDict
+sys.path.insert(0, './lavila')
+from lavila.data.video_transforms import Permute
 from contextlib import contextmanager
 import matplotlib.pyplot as plt
+from collections import OrderedDict
+import torchvision.transforms as transforms
+import torchvision.transforms._transforms_video as transforms_video
 
 def process_segments(segments: list[dict]) -> dict:
     labeled_time = {}
@@ -121,6 +129,72 @@ def decode_one(generated_ids, tokenizer):
         eos_id = len(generated_ids.tolist()) - 1
     generated_text_str = tokenizer.tokenizer.decode(generated_ids[1:eos_id].tolist())
     return generated_text_str
+
+def load_model(model, model_weight_path):
+    ckpt_path = pathlib.Path(model_weight_path)
+    with set_posix_windows():
+        ckpt = torch.load(ckpt_path, map_location='cpu')
+    state_dict = OrderedDict()
+    for k, v in ckpt['state_dict'].items():
+        state_dict[k.replace('module.', '')] = v
+        
+    constructed_model = model(
+        text_use_cls_token=False,
+        project_embed_dim=256,
+        gated_xattn=True,
+        timesformer_gated_xattn=False,
+        freeze_lm_vclm=False,
+        freeze_visual_vclm=False,
+        freeze_visual_vclm_temporal=False,
+        num_frames=4,
+        drop_path_rate=0.
+    )
+    constructed_model.load_state_dict(state_dict, strict=True)
+    constructed_model.eval()
+    return constructed_model
+
+def transform_frames(crop_size, original_frames):
+    val_transform = transforms.Compose([
+        Permute([1, 0, 2, 3]), # convert to [C, T, H, W]
+        transforms.Resize(crop_size),
+        transforms.CenterCrop(crop_size),
+        transforms_video.NormalizeVideo(mean=[108.3272985, 116.7460125, 104.09373615000001], std=[68.5005327, 66.6321579, 70.32316305])
+
+    ])
+    transformed_frames = val_transform(original_frames)
+    return transformed_frames
+
+def generate_caption(model, tokenizer, num_input_frames, input_frames, k_candidate):
+    descriptions = []
+    input = input_frames.unsqueeze(0) 
+    for i in range(0, input.size(2),num_input_frames):
+        frame_chunk = input[:, :, i: i + num_input_frames, :, :]
+        frame_des = []
+        with torch.no_grad():
+            image_features = model.encode_image(frame_chunk)  
+            generated_text_ids,_ = model.generate(
+                image_features,
+                tokenizer,
+                target=None,
+                max_text_length=77,
+                top_k=None,
+                top_p=0.95,
+                num_return_sequences=k_candidate,  
+                temperature=0.5,
+                early_stopping=True,
+            )
+        
+        for i in range(k_candidate):
+            generated_text_str = decode_one(generated_text_ids[i], tokenizer)
+            frame_des.append(generated_text_str)
+
+        descriptions.append(frame_des)
+
+    for i, description in enumerate(descriptions):
+        print(f"Frame chunk {i}: {description}")
+    
+    return descriptions
+
 
 # def example_read_video(video_object, start=0, end=None):
 #     if end is None:
